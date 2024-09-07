@@ -6,10 +6,12 @@ import 'map_page.dart';
 import 'camera_page.dart';
 
 void main() {
-  runApp(MyApp());
+  runApp(const MyApp());
 }
 
 class MyApp extends StatefulWidget {
+  const MyApp({super.key});
+
   @override
   _MyAppState createState() => _MyAppState();
 }
@@ -37,7 +39,7 @@ class _MyAppState extends State<MyApp> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
-      return MaterialApp(
+      return const MaterialApp(
         home: Scaffold(
           body: Center(child: CircularProgressIndicator()),
         ),
@@ -45,17 +47,19 @@ class _MyAppState extends State<MyApp> {
     }
 
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Pothole detector',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
         useMaterial3: true,
       ),
-      home: _isLoggedIn ? MainPage() : LoginPage(),  // Show login page if not logged in
+      home: _isLoggedIn ? const MainPage() : const LoginPage(),  // Show login page if not logged in
     );
   }
 }
 
 class MainPage extends StatefulWidget {
+  const MainPage({super.key});
+
   @override
   _MainPageState createState() => _MainPageState();
 }
@@ -63,7 +67,7 @@ class MainPage extends StatefulWidget {
 class _MainPageState extends State<MainPage> {
   int _selectedIndex = 0;
   static const List<Widget> _widgetOptions = <Widget>[
-    MyHomePage(title: 'Flutter Demo Home Page'),
+    MyHomePage(title: 'Home Page'),
     MapPage(),
     CameraPage(),  // CameraPage here
   ];

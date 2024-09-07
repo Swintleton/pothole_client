@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -5,6 +6,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'main.dart';
 
 class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
   @override
   _LoginPageState createState() => _LoginPageState();
 }
@@ -21,37 +24,49 @@ class _LoginPageState extends State<LoginPage> {
       _errorMessage = null;
     });
 
-    final response = await http.post(
-      Uri.parse('http://192.168.0.115:5000/login'),  // Replace with your server address
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'username': _usernameController.text,
-        'password': _passwordController.text,
-      }),
-    );
+    try {
+      final response = await http
+          .post(
+            Uri.parse('http://192.168.0.115:5000/login'),  // Replace with your server address
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'username': _usernameController.text,
+              'password': _passwordController.text,
+            }),
+          )
+          .timeout(const Duration(seconds: 10)); // Set a 10-second timeout
 
-    if (response.statusCode == 200) {
-      final jsonResponse = jsonDecode(response.body);
-      final token = jsonResponse['auth_token'];
+      if (response.statusCode == 200) {
+        final jsonResponse = jsonDecode(response.body);
+        final token = jsonResponse['auth_token'];
 
-      // Save the token in local storage
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('auth_token', token);
+        // Save the token in local storage
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('auth_token', token);
 
-      // Navigate to the main app after successful login
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => MyApp()),  // Redirect to the main app
-      );
-    } else {
+        // Navigate to the main app after successful login
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const MyApp()),  // Redirect to the main app
+        );
+      } else {
+        setState(() {
+          _errorMessage = 'Invalid username or password';
+        });
+      }
+    } on TimeoutException {
       setState(() {
-        _errorMessage = 'Invalid username or password';
+        _errorMessage = 'Connection timed out. Please try again.';
+      });
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'An error occurred. Please try again.';
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
       });
     }
-
-    setState(() {
-      _isLoading = false;
-    });
   }
 
   @override
@@ -67,25 +82,25 @@ class _LoginPageState extends State<LoginPage> {
           children: [
             TextField(
               controller: _usernameController,
-              decoration: InputDecoration(labelText: 'Username'),
+              decoration: const InputDecoration(labelText: 'Username'),
             ),
             TextField(
               controller: _passwordController,
-              decoration: InputDecoration(labelText: 'Password'),
+              decoration: const InputDecoration(labelText: 'Password'),
               obscureText: true,
             ),
             const SizedBox(height: 20),
             _errorMessage != null
                 ? Text(
                     _errorMessage!,
-                    style: TextStyle(color: Colors.red),
+                    style: const TextStyle(color: Colors.red),
                   )
                 : Container(),
             _isLoading
-                ? CircularProgressIndicator()
+                ? const CircularProgressIndicator()
                 : ElevatedButton(
                     onPressed: _login,
-                    child: Text('Login'),
+                    child: const Text('Login'),
                   ),
           ],
         ),

@@ -6,6 +6,9 @@ import 'dart:async';
 import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:web_socket_channel/io.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 class CameraPage extends StatefulWidget {
   const CameraPage({super.key});
@@ -20,18 +23,20 @@ class _CameraPageState extends State<CameraPage> {
   bool isCameraInitialized = false;
   bool isUploading = false;
   Timer? timer;
-  bool _isDialogActive = false;
+  late WebSocketChannel channel;
 
   @override
   void initState() {
     super.initState();
     initializeCamera();
+    connectWebSocket();
   }
 
   @override
   void dispose() {
-    controller?.dispose();
+    controller.dispose();
     timer?.cancel();
+    channel.sink.close(); // Close WebSocket connection when disposing the widget
     super.dispose();
   }
 
@@ -44,7 +49,7 @@ class _CameraPageState extends State<CameraPage> {
         if (cameras.isNotEmpty) {
           controller = CameraController(firstCamera, ResolutionPreset.high, enableAudio: false);
 
-          await controller?.initialize();
+          await controller.initialize();
 
           if (!mounted) return;
 
@@ -52,7 +57,7 @@ class _CameraPageState extends State<CameraPage> {
             isCameraInitialized = true;
           });
 
-          controller!.startImageStream((CameraImage image) {
+          controller.startImageStream((CameraImage image) {
             if (!isUploading) {
               isUploading = true;
               captureFrame(image);
@@ -72,14 +77,12 @@ class _CameraPageState extends State<CameraPage> {
   }
 
   void captureFrameFromStream() {
-    if (controller != null && controller!.value.isStreamingImages) {
+    if (controller.value.isStreamingImages) {
       isUploading = false;
     }
   }
 
   Future<void> captureFrame(CameraImage image) async {
-    if (_isDialogActive) return; // Skip frame capture if a dialog is active
-
     try {
       final List<int> bytes = [];
       for (var plane in image.planes) {
@@ -94,6 +97,10 @@ class _CameraPageState extends State<CameraPage> {
 
       final String filename = 'frame_${DateTime.now().millisecondsSinceEpoch}.jpg';
 
+      // Retrieve the authentication token
+      final prefs = await SharedPreferences.getInstance();
+      final authToken = prefs.getString('auth_token');
+
       final request = http.MultipartRequest(
         'POST',
         Uri.parse('http://192.168.0.115:5000/upload_frame'),
@@ -104,28 +111,13 @@ class _CameraPageState extends State<CameraPage> {
       request.fields['latitude'] = locationData.latitude.toString();
       request.fields['longitude'] = locationData.longitude.toString();
 
+      if (authToken != null) {
+        request.headers['Authorization'] = 'Bearer $authToken';
+      }
+
       final response = await request.send();
       if (response.statusCode == 200) {
-        final responseBody = await response.stream.bytesToString();
-        final jsonResponse = jsonDecode(responseBody);
-
-        if (jsonResponse['message'] == 'Pothole detected. Confirm?') {
-          _isDialogActive = true; // Mark dialog as active
-          bool? confirmed = await showConfirmationDialog(
-            jsonResponse['filename'],
-            jsonResponse['latitude'],
-            jsonResponse['longitude']
-          );
-
-          await confirmDetection(
-            jsonResponse['filename'],
-            jsonResponse['latitude'],
-            jsonResponse['longitude'],
-            confirmed
-          );
-        } else {
-          print(jsonResponse['message']);
-        }
+        print('Frame uploaded successfully');
       } else {
         print('Failed to upload frame');
       }
@@ -134,6 +126,64 @@ class _CameraPageState extends State<CameraPage> {
     } finally {
       isUploading = false;
     }
+  }
+
+  void connectWebSocket() {
+    // Establish WebSocket connection
+    channel = IOWebSocketChannel.connect('ws://192.168.0.115:5000/confirm');
+    print("WebSocket connection established");
+
+    // Listen for messages from the server
+    channel.stream.listen((message) {
+      print("Received message: $message");
+      final jsonResponse = jsonDecode(message);
+      if (jsonResponse['type'] == 'confirmation_request') {
+        showConfirmationDialog(jsonResponse['filename']);
+      }
+    }, onError: (error) {
+      print("WebSocket error: $error");
+    }, onDone: () {
+      print("WebSocket connection closed");
+    });
+  }
+
+  Future<void> showConfirmationDialog(String filename) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false, // User must tap a button
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Pothole Detected'),
+          content: const SingleChildScrollView(
+            child: ListBody(
+              children: <Widget>[
+                Text('A pothole was detected in the image. Do you confirm this detection?'),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop(false);
+              },
+            ),
+            TextButton(
+              child: const Text('Confirm'),
+              onPressed: () {
+                Navigator.of(context).pop(true);
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    // Send the response back to the server
+    channel.sink.add(jsonEncode({
+      'filename': filename,
+      'confirmed': confirmed ?? false,
+    }));
   }
 
   img.Image cropCenterSquare(img.Image src, int size) {
@@ -172,18 +222,6 @@ class _CameraPageState extends State<CameraPage> {
     return rotatedImage;
   }
 
-  int yuv2rgb(int y, int u, int v) {
-    int r = (y + (1.370705 * (v - 128))).toInt();
-    int g = (y - (0.337633 * (u - 128)) - (0.698001 * (v - 128))).toInt();
-    int b = (y + (1.732446 * (u - 128))).toInt();
-
-    r = r.clamp(0, 255);
-    g = g.clamp(0, 255);
-    b = b.clamp(0, 255);
-
-    return (255 << 24) | (r << 16) | (g << 8) | b; // ARGB format
-  }
-
   @override
   Widget build(BuildContext context) {
     if (!isCameraInitialized) {
@@ -204,9 +242,9 @@ class _CameraPageState extends State<CameraPage> {
                 child: FittedBox(
                   fit: BoxFit.cover,
                   child: SizedBox(
-                    width: controller!.value.previewSize!.height,
-                    height: controller!.value.previewSize!.width,
-                    child: CameraPreview(controller!),
+                    width: controller.value.previewSize!.height,
+                    height: controller.value.previewSize!.width,
+                    child: CameraPreview(controller),
                   ),
                 ),
               );
@@ -228,60 +266,5 @@ class _CameraPageState extends State<CameraPage> {
         ],
       ),
     );
-  }
-
-  Future<bool?> showConfirmationDialog(String filename, String latitude, String longitude) async {
-    _isDialogActive = true;
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false, // User must tap a button
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Pothole Detected'),
-          content: SingleChildScrollView(
-            child: ListBody(
-              children: <Widget>[
-                Text('A pothole was detected in the image. Do you confirm this detection?'),
-              ],
-            ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: Text('Cancel'),
-              onPressed: () {
-                Navigator.of(context).pop(false);
-              },
-            ),
-            TextButton(
-              child: Text('Confirm'),
-              onPressed: () {
-                Navigator.of(context).pop(true);
-              },
-            ),
-          ],
-        );
-      },
-    );
-    _isDialogActive = false;
-    return result;
-  }
-
-  Future<void> confirmDetection(String filename, String latitude, String longitude, bool? confirmed) async {
-    final response = await http.post(
-      Uri.parse('http://192.168.0.115:5000/confirm_detection'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'filename': filename,
-        'latitude': latitude,
-        'longitude': longitude,
-        'confirmed': confirmed ?? false,
-      }),
-    );
-
-    if (response.statusCode == 200) {
-      print('Confirmation received and data saved');
-    } else {
-      print('Failed to confirm detection');
-    }
   }
 }
