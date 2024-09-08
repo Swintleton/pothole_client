@@ -40,9 +40,10 @@ class _LoginPageState extends State<LoginPage> {
         final jsonResponse = jsonDecode(response.body);
         final token = jsonResponse['auth_token'];
 
-        // Save the token in local storage
+        // Save the username and token in local storage
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('auth_token', token);
+        await prefs.setString('username', _usernameController.text);  // Save the username
+        await prefs.setString('auth_token', token);  // Save the token
 
         // Navigate to the main app after successful login
         Navigator.pushReplacement(
