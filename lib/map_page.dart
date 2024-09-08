@@ -2,7 +2,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
-import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:permission_handler/permission_handler.dart';  // Import permission handler
 
 class MapPage extends StatelessWidget {
   const MapPage({super.key});
@@ -29,17 +30,17 @@ class GoogleMapWidget extends StatefulWidget {
 class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   late GoogleMapController mapController;
   final LatLng _center = const LatLng(47.494367, 19.060115);
-
-  Set<Marker> _markers = {};  // Set to hold markers for potholes
+  Set<Marker> _markers = {};
+  LatLng? _lastLongPressedLocation;
 
   @override
   void initState() {
     super.initState();
-    _requestPermission();
-    _fetchPotholeCoordinates();  // Fetch pothole coordinates when the widget initializes
+    _requestPermission();  // Request location permission
+    _fetchPotholeCoordinates();
   }
 
-  // Request location permission from the user
+  // Request location permissions
   Future<void> _requestPermission() async {
     var status = await Permission.location.status;
     if (!status.isGranted) {
@@ -54,17 +55,159 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     if (response.statusCode == 200) {
       final List<dynamic> data = jsonDecode(response.body);
       setState(() {
-        // Add a marker for each pothole coordinate
         _markers = data.map((pothole) {
           return Marker(
             markerId: MarkerId(pothole['latitude'].toString() + pothole['longitude'].toString()),
             position: LatLng(pothole['latitude'], pothole['longitude']),
-            infoWindow: InfoWindow(title: 'Pothole'),
+            infoWindow: InfoWindow(
+              title: 'Pothole',
+              snippet: 'Tap to edit',
+              onTap: () => _editPothole(pothole['id'], pothole['latitude'], pothole['longitude']),
+            ),
           );
         }).toSet();
       });
     } else {
       print('Failed to load pothole coordinates');
+    }
+  }
+
+  // Handle long press on the map to add a pothole
+  void _onMapLongPressed(LatLng latLng) {
+    setState(() {
+      _lastLongPressedLocation = latLng;
+    });
+    _showAddPotholeDialog(latLng);
+  }
+
+  // Show a dialog to add a new pothole
+  Future<void> _showAddPotholeDialog(LatLng latLng) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false, // User must tap a button
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Add Pothole'),
+          content: Text('Add a pothole at (${latLng.latitude}, ${latLng.longitude})?'),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop(false);
+              },
+            ),
+            TextButton(
+              child: const Text('Add'),
+              onPressed: () {
+                Navigator.of(context).pop(true);
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed == true) {
+      _addPothole(latLng);
+    }
+  }
+
+  // Add pothole by sending the request to the server
+  Future<void> _addPothole(LatLng latLng) async {
+    final prefs = await SharedPreferences.getInstance();
+    final authToken = prefs.getString('auth_token');
+
+    final response = await http.post(
+      Uri.parse('http://192.168.0.115:5000/add_pothole'),
+      headers: {
+        'Authorization': 'Bearer $authToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'latitude': latLng.latitude,
+        'longitude': latLng.longitude,
+      }),
+    );
+
+    if (response.statusCode == 200) {
+      setState(() {
+        _markers.add(Marker(
+          markerId: MarkerId(latLng.toString()),
+          position: latLng,
+          infoWindow: InfoWindow(title: 'New Pothole', snippet: 'New pothole added'),
+        ));
+      });
+    } else {
+      print('Failed to add pothole');
+    }
+  }
+
+  // Edit an existing pothole
+  void _editPothole(int id, double latitude, double longitude) {
+    print('Edit Pothole called for ID: $id');
+    _showEditPotholeDialog(id, LatLng(latitude, longitude));
+  }
+
+  // Show dialog to edit a pothole
+  Future<void> _showEditPotholeDialog(int id, LatLng latLng) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false, // User must tap a button
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Edit Pothole'),
+          content: Text('Edit pothole at (${latLng.latitude}, ${latLng.longitude})?'),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop(false);
+              },
+            ),
+            TextButton(
+              child: const Text('Save'),
+              onPressed: () {
+                Navigator.of(context).pop(true);
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed == true) {
+      _savePotholeEdit(id, latLng);
+    }
+  }
+
+  // Save edited pothole data
+  Future<void> _savePotholeEdit(int id, LatLng latLng) async {
+    final prefs = await SharedPreferences.getInstance();
+    final authToken = prefs.getString('auth_token');
+
+    final response = await http.put(
+      Uri.parse('http://192.168.0.115:5000/edit_pothole/$id'),
+      headers: {
+        'Authorization': 'Bearer $authToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'latitude': latLng.latitude,
+        'longitude': latLng.longitude,
+      }),
+    );
+
+    if (response.statusCode == 200) {
+      setState(() {
+        _markers.removeWhere((marker) => marker.markerId.value == latLng.toString());
+        _markers.add(Marker(
+          markerId: MarkerId(latLng.toString()),
+          position: latLng,
+          infoWindow: InfoWindow(title: 'Edited Pothole', snippet: 'Pothole edited'),
+        ));
+      });
+    } else {
+      print('Failed to edit pothole');
     }
   }
 
@@ -82,7 +225,8 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
       ),
       myLocationEnabled: true,
       myLocationButtonEnabled: true,
-      markers: _markers,  // Show the pothole markers
+      markers: _markers,
+      onLongPress: _onMapLongPressed, // Add long press listener to add pothole
     );
   }
 }
