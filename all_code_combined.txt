@@ -1,0 +1,927 @@
+
+./lib/auth_helper.dart:
+
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+import 'login_page.dart';
+
+class AuthHelper {
+  static Future<void> logout(BuildContext context, bool mounted) async {
+    final prefs = await SharedPreferences.getInstance();
+    final authToken = prefs.getString('auth_token');
+
+    if (authToken != null) {
+      final response = await http.post(
+        Uri.parse('http://192.168.0.115:5000/logout'),
+        headers: {
+          'Authorization': authToken,
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        // Clear the auth token and navigate to the login page, only if still mounted
+        await prefs.remove('auth_token');
+        if (mounted) {
+          Navigator.pushAndRemoveUntil(
+            context,
+            MaterialPageRoute(builder: (context) => const LoginPage()),
+            (Route<dynamic> route) => false,
+          );
+        }
+      } else {
+        // Handle logout error
+        print('Logout failed');
+      }
+    }
+  }
+}
+
+
+
+./lib/camera_page.dart:
+
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:location/location.dart';
+import 'dart:async';
+import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:web_socket_channel/io.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'auth_helper.dart';
+
+class CameraPage extends StatefulWidget {
+  const CameraPage({super.key});
+
+  @override
+  _CameraPageState createState() => _CameraPageState();
+}
+
+class _CameraPageState extends State<CameraPage> {
+  late CameraController controller;
+  late List<CameraDescription> cameras;
+  bool isCameraInitialized = false;
+  bool isUploading = false;
+  Timer? timer;
+  late WebSocketChannel channel;
+
+  @override
+  void initState() {
+    super.initState();
+    initializeCamera();
+    connectWebSocket();
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    timer?.cancel();
+    channel.sink.close(); // Close WebSocket connection when disposing the widget
+    super.dispose();
+  }
+
+  Future<void> initializeCamera() async {
+    try {
+      if (await Permission.camera.request().isGranted) {
+        cameras = await availableCameras();
+        final firstCamera = cameras[0];
+
+        if (cameras.isNotEmpty) {
+          controller = CameraController(firstCamera, ResolutionPreset.high, enableAudio: false);
+
+          await controller.initialize();
+
+          if (!mounted) return;
+
+          setState(() {
+            isCameraInitialized = true;
+          });
+
+          controller.startImageStream((CameraImage image) {
+            if (!isUploading) {
+              isUploading = true;
+              captureFrame(image);
+            }
+          });
+
+          timer = Timer.periodic(const Duration(milliseconds: 3000), (Timer t) => captureFrameFromStream()); // 2 fps
+        } else {
+          print('No cameras available');
+        }
+      } else {
+        print('Camera permissions not granted');
+      }
+    } catch (e) {
+      print('Error initializing camera: $e');
+    }
+  }
+
+  void captureFrameFromStream() {
+    if (controller.value.isStreamingImages) {
+      isUploading = false;
+    }
+  }
+
+  Future<void> captureFrame(CameraImage image) async {
+    try {
+      final List<int> bytes = [];
+      for (var plane in image.planes) {
+        bytes.addAll(plane.bytes);
+      }
+      final Location location = Location();
+      final LocationData locationData = await location.getLocation();
+
+      final img.Image convertedImage = convertYUV420ToImage(image);
+      final img.Image croppedImage = cropCenterSquare(convertedImage, 416);
+      final List<int> jpegBytes = img.encodeJpg(croppedImage);
+
+      final String filename = 'frame_${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+      // Retrieve the authentication token
+      final prefs = await SharedPreferences.getInstance();
+      final authToken = prefs.getString('auth_token');
+
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('http://192.168.0.115:5000/upload_frame'),
+      );
+
+      request.files.add(http.MultipartFile.fromBytes('file', jpegBytes, filename: filename));
+
+      request.fields['latitude'] = locationData.latitude.toString();
+      request.fields['longitude'] = locationData.longitude.toString();
+
+      if (authToken != null) {
+        request.headers['Authorization'] = authToken;
+      }
+
+      final response = await request.send();
+      if (response.statusCode == 200) {
+        print('Frame uploaded successfully');
+      } else if(response.statusCode == 401) {
+        //Invalid token
+        AuthHelper.logout(context, mounted);
+      } else {
+        print('Failed to upload frame');
+      }
+    } catch (e) {
+      print(e);
+    } finally {
+      isUploading = false;
+    }
+  }
+
+  void connectWebSocket() {
+    // Establish WebSocket connection
+    channel = IOWebSocketChannel.connect('ws://192.168.0.115:5000/confirm');
+    print("WebSocket connection established");
+
+    // Listen for messages from the server
+    channel.stream.listen((message) {
+      print("Received message: $message");
+      final jsonResponse = jsonDecode(message);
+      if (jsonResponse['type'] == 'confirmation_request') {
+        showConfirmationDialog(jsonResponse['filename'], jsonResponse['image_url']);
+      }
+    }, onError: (error) {
+      print("WebSocket error: $error");
+    }, onDone: () {
+      print("WebSocket connection closed");
+    });
+  }
+
+  Future<void> showConfirmationDialog(String filename, String imageUrl) async {
+    // Stop the camera stream while showing the confirmation popup
+    await controller.stopImageStream();
+    setState(() {
+      isUploading = true; // Ensure no frames are being uploaded during confirmation
+    });
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false, // User must tap a button
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Pothole Detected'),
+          content: SingleChildScrollView(
+            child: ListBody(
+              children: <Widget>[
+                const Text('A pothole was detected in the image. Do you confirm this detection?'),
+                const SizedBox(height: 10),
+                Image.network(imageUrl),  // Display the detected image
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop(false);  // Return false on cancellation
+              },
+            ),
+            TextButton(
+              child: const Text('Confirm'),
+              onPressed: () {
+                Navigator.of(context).pop(true);  // Return true on confirmation
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    // Send the response back to the server
+    channel.sink.add(jsonEncode({
+      'filename': filename,
+      'confirmed': confirmed ?? false,
+    }));
+
+    // Resume the camera stream after the popup is closed
+    await controller.startImageStream((CameraImage image) {
+      if (!isUploading) {
+        isUploading = true;
+        captureFrame(image);
+      }
+    });
+
+    setState(() {
+      isUploading = false;  // Reset the uploading flag
+    });
+  }
+
+  img.Image cropCenterSquare(img.Image src, int size) {
+    int x = (src.width - size) ~/ 2;
+    int y = (src.height - size) ~/ 2;
+    return img.copyCrop(src, x: x, y: y, width: size, height: size);
+  }
+
+  img.Image convertYUV420ToImage(CameraImage image) {
+    final int width = image.width;
+    final int height = image.height;
+    final int uvRowStride = image.planes[1].bytesPerRow;
+    final int uvPixelStride = image.planes[1].bytesPerPixel ?? 1;
+
+    final img.Image imgImage = img.Image(width: width, height: height);
+
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        final int uvIndex = uvRowStride * (y >> 1) + (x >> 1) * uvPixelStride;
+
+        final int yp = image.planes[0].bytes[y * width + x];
+        final int up = image.planes[1].bytes[uvIndex];
+        final int vp = image.planes[2].bytes[uvIndex];
+
+        final int r = (yp + (1.370705 * (vp - 128))).clamp(0, 255).toInt();
+        final int g = (yp - (0.337633 * (up - 128)) - (0.698001 * (vp - 128))).clamp(0, 255).toInt();
+        final int b = (yp + (1.732446 * (up - 128))).clamp(0, 255).toInt();
+
+        imgImage.setPixelRgba(x, y, r, g, b, 255);
+      }
+    }
+
+    // Rotate the image to correct the orientation
+    final img.Image rotatedImage = img.copyRotate(imgImage, angle: 90);
+
+    return rotatedImage;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isCameraInitialized) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Camera Stream'),
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+      ),
+      body: Stack(
+        children: [
+          LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints constraints) {
+              return SizedBox(
+                width: constraints.maxWidth,
+                height: constraints.maxHeight,
+                child: FittedBox(
+                  fit: BoxFit.cover,
+                  child: SizedBox(
+                    width: controller.value.previewSize!.height,
+                    height: controller.value.previewSize!.width,
+                    child: CameraPreview(controller),
+                  ),
+                ),
+              );
+            },
+          ),
+          Center(
+            child: Container(
+              width: 300,
+              height: 300,
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: Colors.red,
+                  width: 3,
+                  style: BorderStyle.solid,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+
+./lib/login_page.dart:
+
+import 'dart:async';
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'main.dart';
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  _LoginPageState createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final TextEditingController _usernameController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  bool _isLoading = false;
+  String? _errorMessage;
+
+  Future<void> _login() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse('http://192.168.0.115:5000/login'),  // Replace with your server address
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'username': _usernameController.text,
+              'password': _passwordController.text,
+            }),
+          )
+          .timeout(const Duration(seconds: 10)); // Set a 10-second timeout
+
+      if (response.statusCode == 200) {
+        final jsonResponse = jsonDecode(response.body);
+        final token = jsonResponse['auth_token'];
+
+        // Save the username and token in local storage
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('username', _usernameController.text);  // Save the username
+        await prefs.setString('auth_token', token);  // Save the token
+
+        // Navigate to the main app after successful login
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const MyApp()),  // Redirect to the main app
+        );
+      } else {
+        setState(() {
+          _errorMessage = 'Invalid username or password';
+        });
+      }
+    } on TimeoutException {
+      setState(() {
+        _errorMessage = 'Connection timed out. Please try again.';
+      });
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'An error occurred. Please try again.';
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Login'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            TextField(
+              controller: _usernameController,
+              decoration: const InputDecoration(labelText: 'Username'),
+            ),
+            TextField(
+              controller: _passwordController,
+              decoration: const InputDecoration(labelText: 'Password'),
+              obscureText: true,
+            ),
+            const SizedBox(height: 20),
+            _errorMessage != null
+                ? Text(
+                    _errorMessage!,
+                    style: const TextStyle(color: Colors.red),
+                  )
+                : Container(),
+            _isLoading
+                ? const CircularProgressIndicator()
+                : ElevatedButton(
+                    onPressed: _login,
+                    child: const Text('Login'),
+                  ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+
+./lib/main.dart:
+
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'login_page.dart';
+import 'my_home_page.dart';
+import 'map_page.dart';
+import 'camera_page.dart';
+
+void main() {
+  runApp(const MyApp());
+}
+
+class MyApp extends StatefulWidget {
+  const MyApp({super.key});
+
+  @override
+  _MyAppState createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  bool _isLoggedIn = false;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkLoginStatus();
+  }
+
+  Future<void> _checkLoginStatus() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token');
+
+    setState(() {
+      _isLoggedIn = token != null;
+      _isLoading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const MaterialApp(
+        home: Scaffold(
+          body: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+
+    return MaterialApp(
+      title: 'Pothole detector',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        useMaterial3: true,
+      ),
+      home: _isLoggedIn ? const MainPage() : const LoginPage(),  // Show login page if not logged in
+    );
+  }
+}
+
+class MainPage extends StatefulWidget {
+  const MainPage({super.key});
+
+  @override
+  _MainPageState createState() => _MainPageState();
+}
+
+class _MainPageState extends State<MainPage> {
+  int _selectedIndex = 0;
+  static const List<Widget> _widgetOptions = <Widget>[
+    MyHomePage(title: 'Home Page'),
+    MapPage(),
+    CameraPage(),  // CameraPage here
+  ];
+
+  void _onItemTapped(int index) {
+    setState(() {
+      _selectedIndex = index;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: _widgetOptions.elementAt(_selectedIndex),
+      bottomNavigationBar: BottomNavigationBar(
+        items: const <BottomNavigationBarItem>[
+          BottomNavigationBarItem(
+            icon: Icon(Icons.home),
+            label: 'Home',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.map),
+            label: 'Map',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.camera),
+            label: 'Camera',
+          ),
+        ],
+        currentIndex: _selectedIndex,
+        selectedItemColor: Colors.amber[800],
+        onTap: _onItemTapped,
+      ),
+    );
+  }
+}
+
+
+
+./lib/map_page.dart:
+
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'auth_helper.dart';
+
+class MapPage extends StatelessWidget {
+  const MapPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Google Map'),
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+      ),
+      body: const GoogleMapWidget(),
+    );
+  }
+}
+
+class GoogleMapWidget extends StatefulWidget {
+  const GoogleMapWidget({super.key});
+
+  @override
+  State<GoogleMapWidget> createState() => _GoogleMapWidgetState();
+}
+
+class _GoogleMapWidgetState extends State<GoogleMapWidget> {
+  late GoogleMapController mapController;
+  final LatLng _center = const LatLng(47.494367, 19.060115);
+  Set<Marker> _markers = {};
+  LatLng? _lastLongPressedLocation;
+
+  @override
+  void initState() {
+    super.initState();
+    _requestPermission();  // Request location permission
+    _fetchPotholeCoordinates();
+  }
+
+  // Request location permissions
+  Future<void> _requestPermission() async {
+    var status = await Permission.location.status;
+    if (!status.isGranted) {
+      await Permission.location.request();
+    }
+  }
+
+  // Fetch pothole coordinates from the server
+  Future<void> _fetchPotholeCoordinates() async {
+    final response = await http.get(Uri.parse('http://192.168.0.115:5000/potholes'));
+
+    if (response.statusCode == 200) {
+      final List<dynamic> data = jsonDecode(response.body);
+      setState(() {
+        _markers = data.map((pothole) {
+          return Marker(
+            markerId: MarkerId(pothole['latitude'].toString() + pothole['longitude'].toString()),
+            position: LatLng(pothole['latitude'], pothole['longitude']),
+            infoWindow: InfoWindow(
+              title: 'Pothole',
+              snippet: 'Tap to edit',
+              onTap: () => _editPothole(pothole['id'], pothole['latitude'], pothole['longitude'], pothole['filename']),
+            ),
+          );
+        }).toSet();
+      });
+    } else if(response.statusCode == 401) {
+      //Invalid token
+      AuthHelper.logout(context, mounted);
+    } else {
+      print('Failed to load pothole coordinates');
+    }
+  }
+
+  // Handle long press on the map to add a pothole
+  void _onMapLongPressed(LatLng latLng) {
+    setState(() {
+      _lastLongPressedLocation = latLng;
+    });
+    _showAddPotholeDialog(latLng);
+  }
+
+  // Show a dialog to add a new pothole
+  Future<void> _showAddPotholeDialog(LatLng latLng) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false, // User must tap a button
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Add Pothole'),
+          content: Text('Add a pothole at (${latLng.latitude}, ${latLng.longitude})?'),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop(false);
+              },
+            ),
+            TextButton(
+              child: const Text('Add'),
+              onPressed: () {
+                Navigator.of(context).pop(true);
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed == true) {
+      _addPothole(latLng);
+    }
+  }
+
+  // Add pothole by sending the request to the server
+  Future<void> _addPothole(LatLng latLng) async {
+    final prefs = await SharedPreferences.getInstance();
+    final authToken = prefs.getString('auth_token');
+
+    final response = await http.post(
+      Uri.parse('http://192.168.0.115:5000/add_pothole'),
+      headers: {
+        'Authorization': '$authToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'latitude': latLng.latitude,
+        'longitude': latLng.longitude,
+      }),
+    );
+
+    if (response.statusCode == 200) {
+      // Assuming the server returns the ID and filename of the newly created pothole
+      final data = jsonDecode(response.body);
+      final int potholeId = data['id'];
+      final String filename = data['filename'];
+
+      setState(() {
+        _markers.add(Marker(
+          markerId: MarkerId(latLng.toString()),
+          position: latLng,
+          infoWindow: InfoWindow(
+            title: 'New Pothole',
+            snippet: 'Tap to edit',
+            onTap: () => _editPothole(potholeId, latLng.latitude, latLng.longitude, filename),
+          ),
+        ));
+      });
+    } else if (response.statusCode == 401) {
+      // Invalid token
+      AuthHelper.logout(context, mounted);
+    } else {
+      print('Failed to add pothole');
+    }
+  }
+
+  // Edit an existing pothole and include filename for detected image
+  void _editPothole(int id, double latitude, double longitude, String filename) async {
+    _showEditPotholeDialog(id, latitude, longitude, filename);
+  }
+
+  // Show dialog to edit a pothole
+  Future<void> _showEditPotholeDialog(int id, double latitude, double longitude, String filename) async {
+    final latitudeController = TextEditingController(text: latitude.toString());
+    final longitudeController = TextEditingController(text: longitude.toString());
+    String detectedImageUrl = '';
+
+    // Fetch detected image URL for the pothole (if available)
+    if (
+      filename.isNotEmpty &&
+      filename != "manual_entry_detected.jpg" &&
+      filename != "manual_entry.jpg") {
+      detectedImageUrl = 'http://192.168.0.115:5000/confirmed/$filename';
+    }
+
+    await showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Edit Pothole'),
+          content: SingleChildScrollView(
+            child: ListBody(
+              children: <Widget>[
+                // Latitude input
+                TextField(
+                  controller: latitudeController,
+                  decoration: const InputDecoration(labelText: 'Latitude'),
+                ),
+                // Longitude input
+                TextField(
+                  controller: longitudeController,
+                  decoration: const InputDecoration(labelText: 'Longitude'),
+                ),
+                const SizedBox(height: 20),
+                // Display detected frame image if available
+                detectedImageUrl.isNotEmpty
+                    ? Column(
+                        children: [
+                          const Text('Detected Frame:'),
+                          const SizedBox(height: 10),
+                          Image.network(detectedImageUrl, height: 200),
+                        ],
+                      )
+                    : const Text('No detected image available.'),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+            TextButton(
+              child: const Text('Save'),
+              onPressed: () async {
+                // Update pothole with new latitude/longitude
+                await _savePothole(
+                  id,
+                  double.parse(latitudeController.text),
+                  double.parse(longitudeController.text),
+                );
+                Navigator.of(context).pop();
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _savePothole(int id, double latitude, double longitude) async {
+    final prefs = await SharedPreferences.getInstance();
+    final authToken = prefs.getString('auth_token');
+
+    final response = await http.put(
+      Uri.parse('http://192.168.0.115:5000/edit_pothole/$id'),
+      headers: {
+        'Authorization': '$authToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'latitude': latitude,
+        'longitude': longitude,
+      }),
+    );
+
+    if (response.statusCode == 200) {
+      setState(() {
+        _markers.removeWhere((marker) =>
+            marker.markerId.value == LatLng(latitude, longitude).toString());
+        _markers.add(Marker(
+          markerId: MarkerId(LatLng(latitude, longitude).toString()),
+          position: LatLng(latitude, longitude),
+          infoWindow: const InfoWindow(
+              title: 'Edited Pothole', snippet: 'Pothole updated'),
+        ));
+      });
+    } else if(response.statusCode == 401) {
+      //Invalid token
+      AuthHelper.logout(context, mounted);
+    } else {
+      print('Failed to update pothole');
+    }
+  }
+
+  void _onMapCreated(GoogleMapController controller) {
+    mapController = controller;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GoogleMap(
+      onMapCreated: _onMapCreated,
+      initialCameraPosition: CameraPosition(
+        target: _center,
+        zoom: 11.0,
+      ),
+      myLocationEnabled: true,
+      myLocationButtonEnabled: true,
+      markers: _markers,
+      onLongPress: _onMapLongPressed, // Add long press listener to add pothole
+    );
+  }
+}
+
+
+
+./lib/my_home_page.dart:
+
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'auth_helper.dart';
+
+class MyHomePage extends StatefulWidget {
+  const MyHomePage({super.key, required this.title});
+
+  final String title;
+
+  @override
+  State<MyHomePage> createState() => _MyHomePageState();
+}
+
+class _MyHomePageState extends State<MyHomePage> {
+  String? username;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserInfo();
+  }
+
+  // Load the username from SharedPreferences
+  Future<void> _loadUserInfo() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      username = prefs.getString('username') ?? 'User';  // Fetch the username or show 'User' if not available
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        title: const Text('Pothole Detector'),  // Pothole Detector at the top
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: () {
+              AuthHelper.logout(context, mounted); // Trigger logout when pressed
+            },
+            tooltip: 'Logout',
+          ),
+        ],
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            Text(
+              'Welcome, $username',  // Welcome message in the center
+              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+

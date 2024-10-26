@@ -3,7 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:permission_handler/permission_handler.dart';  // Import permission handler
+import 'package:permission_handler/permission_handler.dart';
+import 'auth_helper.dart';
 
 class MapPage extends StatelessWidget {
   const MapPage({super.key});
@@ -62,11 +63,14 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
             infoWindow: InfoWindow(
               title: 'Pothole',
               snippet: 'Tap to edit',
-              onTap: () => _editPothole(pothole['id'], pothole['latitude'], pothole['longitude']),
+              onTap: () => _editPothole(pothole['id'], pothole['latitude'], pothole['longitude'], pothole['filename']),
             ),
           );
         }).toSet();
       });
+    } else if(response.statusCode == 401) {
+      //Invalid token
+      AuthHelper.logout(context, mounted);
     } else {
       print('Failed to load pothole coordinates');
     }
@@ -120,7 +124,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     final response = await http.post(
       Uri.parse('http://192.168.0.115:5000/add_pothole'),
       headers: {
-        'Authorization': 'Bearer $authToken',
+        'Authorization': '$authToken',
         'Content-Type': 'application/json',
       },
       body: jsonEncode({
@@ -130,84 +134,138 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     );
 
     if (response.statusCode == 200) {
+      // Assuming the server returns the ID and filename of the newly created pothole
+      final data = jsonDecode(response.body);
+      final int potholeId = data['id'];
+      final String filename = data['filename'];
+
       setState(() {
         _markers.add(Marker(
           markerId: MarkerId(latLng.toString()),
           position: latLng,
-          infoWindow: InfoWindow(title: 'New Pothole', snippet: 'New pothole added'),
+          infoWindow: InfoWindow(
+            title: 'New Pothole',
+            snippet: 'Tap to edit',
+            onTap: () => _editPothole(potholeId, latLng.latitude, latLng.longitude, filename),
+          ),
         ));
       });
+    } else if (response.statusCode == 401) {
+      // Invalid token
+      AuthHelper.logout(context, mounted);
     } else {
       print('Failed to add pothole');
     }
   }
 
-  // Edit an existing pothole
-  void _editPothole(int id, double latitude, double longitude) {
-    print('Edit Pothole called for ID: $id');
-    _showEditPotholeDialog(id, LatLng(latitude, longitude));
+  // Edit an existing pothole and include filename for detected image
+  void _editPothole(int id, double latitude, double longitude, String filename) async {
+    _showEditPotholeDialog(id, latitude, longitude, filename);
   }
 
   // Show dialog to edit a pothole
-  Future<void> _showEditPotholeDialog(int id, LatLng latLng) async {
-    final confirmed = await showDialog<bool>(
+  Future<void> _showEditPotholeDialog(int id, double latitude, double longitude, String filename) async {
+    final latitudeController = TextEditingController(text: latitude.toString());
+    final longitudeController = TextEditingController(text: longitude.toString());
+    String detectedImageUrl = '';
+
+    // Fetch detected image URL for the pothole (if available)
+    if (
+      filename.isNotEmpty &&
+      filename != "manual_entry_detected.jpg" &&
+      filename != "manual_entry.jpg") {
+      detectedImageUrl = 'http://192.168.0.115:5000/confirmed/$filename';
+    }
+
+    await showDialog(
       context: context,
-      barrierDismissible: false, // User must tap a button
       builder: (BuildContext context) {
         return AlertDialog(
           title: const Text('Edit Pothole'),
-          content: Text('Edit pothole at (${latLng.latitude}, ${latLng.longitude})?'),
+          content: SingleChildScrollView(
+            child: ListBody(
+              children: <Widget>[
+                // Latitude input
+                TextField(
+                  controller: latitudeController,
+                  decoration: const InputDecoration(labelText: 'Latitude'),
+                ),
+                // Longitude input
+                TextField(
+                  controller: longitudeController,
+                  decoration: const InputDecoration(labelText: 'Longitude'),
+                ),
+                const SizedBox(height: 20),
+                // Display detected frame image if available
+                detectedImageUrl.isNotEmpty
+                    ? Column(
+                        children: [
+                          const Text('Detected Frame:'),
+                          const SizedBox(height: 10),
+                          Image.network(detectedImageUrl, height: 200),
+                        ],
+                      )
+                    : const Text('No detected image available.'),
+              ],
+            ),
+          ),
           actions: <Widget>[
             TextButton(
               child: const Text('Cancel'),
               onPressed: () {
-                Navigator.of(context).pop(false);
+                Navigator.of(context).pop();
               },
             ),
             TextButton(
               child: const Text('Save'),
-              onPressed: () {
-                Navigator.of(context).pop(true);
+              onPressed: () async {
+                // Update pothole with new latitude/longitude
+                await _savePothole(
+                  id,
+                  double.parse(latitudeController.text),
+                  double.parse(longitudeController.text),
+                );
+                Navigator.of(context).pop();
               },
             ),
           ],
         );
       },
     );
-
-    if (confirmed == true) {
-      _savePotholeEdit(id, latLng);
-    }
   }
 
-  // Save edited pothole data
-  Future<void> _savePotholeEdit(int id, LatLng latLng) async {
+  Future<void> _savePothole(int id, double latitude, double longitude) async {
     final prefs = await SharedPreferences.getInstance();
     final authToken = prefs.getString('auth_token');
 
     final response = await http.put(
       Uri.parse('http://192.168.0.115:5000/edit_pothole/$id'),
       headers: {
-        'Authorization': 'Bearer $authToken',
+        'Authorization': '$authToken',
         'Content-Type': 'application/json',
       },
       body: jsonEncode({
-        'latitude': latLng.latitude,
-        'longitude': latLng.longitude,
+        'latitude': latitude,
+        'longitude': longitude,
       }),
     );
 
     if (response.statusCode == 200) {
       setState(() {
-        _markers.removeWhere((marker) => marker.markerId.value == latLng.toString());
+        _markers.removeWhere((marker) =>
+            marker.markerId.value == LatLng(latitude, longitude).toString());
         _markers.add(Marker(
-          markerId: MarkerId(latLng.toString()),
-          position: latLng,
-          infoWindow: InfoWindow(title: 'Edited Pothole', snippet: 'Pothole edited'),
+          markerId: MarkerId(LatLng(latitude, longitude).toString()),
+          position: LatLng(latitude, longitude),
+          infoWindow: const InfoWindow(
+              title: 'Edited Pothole', snippet: 'Pothole updated'),
         ));
       });
+    } else if(response.statusCode == 401) {
+      //Invalid token
+      AuthHelper.logout(context, mounted);
     } else {
-      print('Failed to edit pothole');
+      print('Failed to update pothole');
     }
   }
 

@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'auth_helper.dart';
 
 class CameraPage extends StatefulWidget {
   const CameraPage({super.key});
@@ -64,7 +65,7 @@ class _CameraPageState extends State<CameraPage> {
             }
           });
 
-          timer = Timer.periodic(const Duration(milliseconds: 333), (Timer t) => captureFrameFromStream()); // 3 fps
+          timer = Timer.periodic(const Duration(milliseconds: 3000), (Timer t) => captureFrameFromStream()); // 2 fps
         } else {
           print('No cameras available');
         }
@@ -112,12 +113,15 @@ class _CameraPageState extends State<CameraPage> {
       request.fields['longitude'] = locationData.longitude.toString();
 
       if (authToken != null) {
-        request.headers['Authorization'] = 'Bearer $authToken';
+        request.headers['Authorization'] = authToken;
       }
 
       final response = await request.send();
       if (response.statusCode == 200) {
         print('Frame uploaded successfully');
+      } else if(response.statusCode == 401) {
+        //Invalid token
+        AuthHelper.logout(context, mounted);
       } else {
         print('Failed to upload frame');
       }
@@ -138,7 +142,7 @@ class _CameraPageState extends State<CameraPage> {
       print("Received message: $message");
       final jsonResponse = jsonDecode(message);
       if (jsonResponse['type'] == 'confirmation_request') {
-        showConfirmationDialog(jsonResponse['filename']);
+        showConfirmationDialog(jsonResponse['filename'], jsonResponse['image_url']);
       }
     }, onError: (error) {
       print("WebSocket error: $error");
@@ -147,17 +151,25 @@ class _CameraPageState extends State<CameraPage> {
     });
   }
 
-  Future<void> showConfirmationDialog(String filename) async {
+  Future<void> showConfirmationDialog(String filename, String imageUrl) async {
+    // Stop the camera stream while showing the confirmation popup
+    await controller.stopImageStream();
+    setState(() {
+      isUploading = true; // Ensure no frames are being uploaded during confirmation
+    });
+
     final confirmed = await showDialog<bool>(
       context: context,
       barrierDismissible: false, // User must tap a button
       builder: (BuildContext context) {
         return AlertDialog(
           title: const Text('Pothole Detected'),
-          content: const SingleChildScrollView(
+          content: SingleChildScrollView(
             child: ListBody(
               children: <Widget>[
-                Text('A pothole was detected in the image. Do you confirm this detection?'),
+                const Text('A pothole was detected in the image. Do you confirm this detection?'),
+                const SizedBox(height: 10),
+                Image.network(imageUrl),  // Display the detected image
               ],
             ),
           ),
@@ -165,13 +177,13 @@ class _CameraPageState extends State<CameraPage> {
             TextButton(
               child: const Text('Cancel'),
               onPressed: () {
-                Navigator.of(context).pop(false);
+                Navigator.of(context).pop(false);  // Return false on cancellation
               },
             ),
             TextButton(
               child: const Text('Confirm'),
               onPressed: () {
-                Navigator.of(context).pop(true);
+                Navigator.of(context).pop(true);  // Return true on confirmation
               },
             ),
           ],
@@ -184,6 +196,18 @@ class _CameraPageState extends State<CameraPage> {
       'filename': filename,
       'confirmed': confirmed ?? false,
     }));
+
+    // Resume the camera stream after the popup is closed
+    await controller.startImageStream((CameraImage image) {
+      if (!isUploading) {
+        isUploading = true;
+        captureFrame(image);
+      }
+    });
+
+    setState(() {
+      isUploading = false;  // Reset the uploading flag
+    });
   }
 
   img.Image cropCenterSquare(img.Image src, int size) {
