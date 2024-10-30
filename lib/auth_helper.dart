@@ -21,6 +21,9 @@ class AuthHelper {
         // Clear the auth token and navigate to the login page, only if still mounted
         await prefs.remove('auth_token');
         if (mounted) {
+          // Clear all stored user data
+          await prefs.clear(); 
+
           Navigator.pushAndRemoveUntil(
             context,
             MaterialPageRoute(builder: (context) => const LoginPage()),
@@ -32,5 +35,22 @@ class AuthHelper {
         print('Logout failed');
       }
     }
+  }
+
+  // Retrieve stored user role
+  static Future<String?> getUserRole() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('user_role');  // Ensure 'user_role' is saved with this key on login
+  }
+
+  // Retrieve stored user ID
+  static Future<int?> getUserId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('user_id');  // Ensure 'user_id' is saved with this key on login
+  }
+
+  static Future<String?> getAuthToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('auth_token');
   }
 }

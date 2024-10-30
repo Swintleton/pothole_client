@@ -96,7 +96,9 @@ class _CameraPageState extends State<CameraPage> {
       final img.Image croppedImage = cropCenterSquare(convertedImage, 416);
       final List<int> jpegBytes = img.encodeJpg(croppedImage);
 
-      final String filename = 'frame_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      int? userId = await AuthHelper.getUserId();
+
+      final String filename = 'frame_$userId${DateTime.now().millisecondsSinceEpoch}.jpg';
 
       // Retrieve the authentication token
       final prefs = await SharedPreferences.getInstance();

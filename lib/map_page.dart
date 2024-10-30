@@ -33,12 +33,24 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   final LatLng _center = const LatLng(47.494367, 19.060115);
   Set<Marker> _markers = {};
   LatLng? _lastLongPressedLocation;
+  String? userRole;
+  int? userId;
 
   @override
   void initState() {
     super.initState();
+    _initializeUserInfo();  // Initialize user information
     _requestPermission();  // Request location permission
     _fetchPotholeCoordinates();
+  }
+
+  Future<void> _initializeUserInfo() async {
+    userRole = await AuthHelper.getUserRole();
+    userId = await AuthHelper.getUserId();
+
+    if (userId == null) {
+      print('Error: User ID is null.');
+    }
   }
 
   // Request location permissions
@@ -58,18 +70,24 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
       setState(() {
         _markers = data.map((pothole) {
           return Marker(
-            markerId: MarkerId(pothole['latitude'].toString() + pothole['longitude'].toString()),
+            markerId: MarkerId(pothole['id'].toString()),
             position: LatLng(pothole['latitude'], pothole['longitude']),
             infoWindow: InfoWindow(
               title: 'Pothole',
               snippet: 'Tap to edit',
-              onTap: () => _editPothole(pothole['id'], pothole['latitude'], pothole['longitude'], pothole['filename']),
+              onTap: () => _editPothole(
+                pothole['id'],
+                pothole['latitude'],
+                pothole['longitude'],
+                pothole['filename'],
+                pothole['user_id'],
+              ),
             ),
           );
         }).toSet();
       });
-    } else if(response.statusCode == 401) {
-      //Invalid token
+    } else if (response.statusCode == 401) {
+      // Invalid token
       AuthHelper.logout(context, mounted);
     } else {
       print('Failed to load pothole coordinates');
@@ -88,7 +106,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   Future<void> _showAddPotholeDialog(LatLng latLng) async {
     final confirmed = await showDialog<bool>(
       context: context,
-      barrierDismissible: false, // User must tap a button
+      barrierDismissible: false,
       builder: (BuildContext context) {
         return AlertDialog(
           title: const Text('Add Pothole'),
@@ -118,8 +136,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
 
   // Add pothole by sending the request to the server
   Future<void> _addPothole(LatLng latLng) async {
-    final prefs = await SharedPreferences.getInstance();
-    final authToken = prefs.getString('auth_token');
+    final authToken = await AuthHelper.getAuthToken();
 
     final response = await http.post(
       Uri.parse('http://192.168.0.115:5000/add_pothole'),
@@ -134,19 +151,18 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     );
 
     if (response.statusCode == 200) {
-      // Assuming the server returns the ID and filename of the newly created pothole
       final data = jsonDecode(response.body);
       final int potholeId = data['id'];
       final String filename = data['filename'];
 
       setState(() {
         _markers.add(Marker(
-          markerId: MarkerId(latLng.toString()),
+          markerId: MarkerId(potholeId.toString()),
           position: latLng,
           infoWindow: InfoWindow(
             title: 'New Pothole',
             snippet: 'Tap to edit',
-            onTap: () => _editPothole(potholeId, latLng.latitude, latLng.longitude, filename),
+            onTap: () => _editPothole(potholeId, latLng.latitude, latLng.longitude, filename, userId!),
           ),
         ));
       });
@@ -158,13 +174,13 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     }
   }
 
-  // Edit an existing pothole and include filename for detected image
-  void _editPothole(int id, double latitude, double longitude, String filename) async {
-    _showEditPotholeDialog(id, latitude, longitude, filename);
+  // Edit an existing pothole
+  void _editPothole(int id, double latitude, double longitude, String filename, int creatorId) async {
+    _showEditPotholeDialog(id, latitude, longitude, filename, creatorId);
   }
 
-  // Show dialog to edit a pothole
-  Future<void> _showEditPotholeDialog(int id, double latitude, double longitude, String filename) async {
+  // Show dialog to edit or delete a pothole
+  Future<void> _showEditPotholeDialog(int id, double latitude, double longitude, String filename, int creatorId) async {
     final latitudeController = TextEditingController(text: latitude.toString());
     final longitudeController = TextEditingController(text: longitude.toString());
     String detectedImageUrl = '';
@@ -173,7 +189,8 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     if (
       filename.isNotEmpty &&
       filename != "manual_entry_detected.jpg" &&
-      filename != "manual_entry.jpg") {
+      filename != "manual_entry.jpg"
+    ) {
       detectedImageUrl = 'http://192.168.0.115:5000/confirmed/$filename';
     }
 
@@ -210,12 +227,14 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
             ),
           ),
           actions: <Widget>[
-            TextButton(
-              child: const Text('Cancel'),
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-            ),
+            if (userRole == 'Admin' || userId == creatorId)
+              TextButton(
+                child: const Text('Delete'),
+                onPressed: () async {
+                  await _deletePothole(id);
+                  Navigator.of(context).pop();
+                },
+              ),
             TextButton(
               child: const Text('Save'),
               onPressed: () async {
@@ -224,7 +243,14 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
                   id,
                   double.parse(latitudeController.text),
                   double.parse(longitudeController.text),
+                  filename,
                 );
+                Navigator.of(context).pop();
+              },
+            ),
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
                 Navigator.of(context).pop();
               },
             ),
@@ -234,9 +260,8 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     );
   }
 
-  Future<void> _savePothole(int id, double latitude, double longitude) async {
-    final prefs = await SharedPreferences.getInstance();
-    final authToken = prefs.getString('auth_token');
+  Future<void> _savePothole(int id, double newLatitude, double newLongitude, String filename) async {
+    final authToken = await AuthHelper.getAuthToken();
 
     final response = await http.put(
       Uri.parse('http://192.168.0.115:5000/edit_pothole/$id'),
@@ -245,27 +270,56 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
         'Content-Type': 'application/json',
       },
       body: jsonEncode({
-        'latitude': latitude,
-        'longitude': longitude,
+        'latitude': newLatitude,
+        'longitude': newLongitude,
       }),
     );
 
     if (response.statusCode == 200) {
       setState(() {
-        _markers.removeWhere((marker) =>
-            marker.markerId.value == LatLng(latitude, longitude).toString());
+        // Remove the old marker
+        _markers.removeWhere((marker) => marker.markerId.value == id.toString());
+
+        // Add a new marker with updated position but same filename
         _markers.add(Marker(
-          markerId: MarkerId(LatLng(latitude, longitude).toString()),
-          position: LatLng(latitude, longitude),
-          infoWindow: const InfoWindow(
-              title: 'Edited Pothole', snippet: 'Pothole updated'),
+          markerId: MarkerId(id.toString()),
+          position: LatLng(newLatitude, newLongitude),
+          infoWindow: InfoWindow(
+            title: 'Edited Pothole',
+            snippet: 'Pothole updated',
+            onTap: () => _editPothole(id, newLatitude, newLongitude, filename, userId!),
+          ),
         ));
       });
-    } else if(response.statusCode == 401) {
-      //Invalid token
+    } else if (response.statusCode == 401) {
       AuthHelper.logout(context, mounted);
     } else {
       print('Failed to update pothole');
+    }
+  }
+
+  // Delete pothole function
+  Future<void> _deletePothole(int id) async {
+    final authToken = await AuthHelper.getAuthToken();
+
+    final response = await http.delete(
+      Uri.parse('http://192.168.0.115:5000/delete_pothole/$id'),
+      headers: {
+        'Authorization': '$authToken',
+        'Content-Type': 'application/json',
+      },
+    );
+
+    if (response.statusCode == 200) {
+      setState(() {
+        // Remove the marker from the local map by matching with the unique ID
+        _markers.removeWhere((marker) => marker.markerId.value == id.toString());
+      });
+      print('Pothole deleted successfully');
+    } else if (response.statusCode == 401) {
+      AuthHelper.logout(context, mounted);
+    } else {
+      print('Failed to delete pothole');
     }
   }
 
@@ -284,7 +338,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
       myLocationEnabled: true,
       myLocationButtonEnabled: true,
       markers: _markers,
-      onLongPress: _onMapLongPressed, // Add long press listener to add pothole
+      onLongPress: _onMapLongPressed,
     );
   }
 }

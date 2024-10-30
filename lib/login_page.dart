@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'main.dart';
+import 'registration_page.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -27,28 +28,32 @@ class _LoginPageState extends State<LoginPage> {
     try {
       final response = await http
           .post(
-            Uri.parse('http://192.168.0.115:5000/login'),  // Replace with your server address
+            Uri.parse('http://192.168.0.115:5000/login'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
-              'username': _usernameController.text,
-              'password': _passwordController.text,
+              'username': _usernameController.text.trim(),
+              'password': _passwordController.text.trim(),
             }),
           )
-          .timeout(const Duration(seconds: 10)); // Set a 10-second timeout
+          .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
         final jsonResponse = jsonDecode(response.body);
         final token = jsonResponse['auth_token'];
+        final userId = jsonResponse['user_id'];
+        final userRole = jsonResponse['user_role'];
 
         // Save the username and token in local storage
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('username', _usernameController.text);  // Save the username
-        await prefs.setString('auth_token', token);  // Save the token
+        await prefs.setString('username', _usernameController.text.trim());
+        await prefs.setString('auth_token', token);
+        await prefs.setInt('user_id', userId);
+        await prefs.setString('user_role', userRole);
 
         // Navigate to the main app after successful login
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (context) => const MyApp()),  // Redirect to the main app
+          MaterialPageRoute(builder: (context) => const MyApp()),
         );
       } else {
         setState(() {
@@ -99,9 +104,25 @@ class _LoginPageState extends State<LoginPage> {
                 : Container(),
             _isLoading
                 ? const CircularProgressIndicator()
-                : ElevatedButton(
-                    onPressed: _login,
-                    child: const Text('Login'),
+                : Column(
+                    children: [
+                      ElevatedButton(
+                        onPressed: _login,
+                        child: const Text('Login'),
+                      ),
+                      const SizedBox(height: 16), // Add space between buttons
+                      TextButton(
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const RegistrationPage(),
+                            ),
+                          );
+                        },
+                        child: const Text('Register'),
+                      ),
+                    ],
                   ),
           ],
         ),
