@@ -19,13 +19,23 @@ class _RegistrationPageState extends State<RegistrationPage> {
   bool _isLoading = false;
   String? _errorMessage;
 
+  bool _isUsernameValid(String username) {
+    final usernameRegex = RegExp(r'^[a-zA-Z0-9\_\-]+$');
+    return usernameRegex.hasMatch(username);
+  }
+
+  bool _isNameValid(String name) {
+    final nameRegex = RegExp(r'^[a-zA-Z0-9\_\-\s]+$');
+    return nameRegex.hasMatch(name);
+  }
+
   bool _isEmailValid(String email) {
     final emailRegex = RegExp(r'^[\w\.-]+@[a-zA-Z\d\.-]+\.[a-zA-Z]{2,}$');
     return emailRegex.hasMatch(email);
   }
 
   bool _isPhoneValid(String phone) {
-    final phoneRegex = RegExp(r'^\+?[0-9\s\-\(\)]{10,15}$');
+    final phoneRegex = RegExp(r'^\+?(\d{1,3})?[-.\s]?(\(?\d{1,4}\)?)[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}$');
     return phoneRegex.hasMatch(phone);
   }
 
@@ -48,6 +58,20 @@ class _RegistrationPageState extends State<RegistrationPage> {
     final password = _passwordController.text.trim();
     final confirmPassword = _confirmPasswordController.text.trim();
 
+    if (!_isUsernameValid(username)) {
+      setState(() {
+        _errorMessage = 'The username can not contain special characters.';
+      });
+      _isLoading = false;
+      return;
+    }
+    if (!_isNameValid(name)) {
+      setState(() {
+        _errorMessage = 'The name can not contain special characters.';
+      });
+      _isLoading = false;
+      return;
+    }
     if (!_isEmailValid(email)) {
       setState(() {
         _errorMessage = 'Please enter a valid email address.';

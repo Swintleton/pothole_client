@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'auth_helper.dart';
 
@@ -63,7 +62,15 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
 
   // Fetch pothole coordinates from the server
   Future<void> _fetchPotholeCoordinates() async {
-    final response = await http.get(Uri.parse('http://192.168.0.115:5000/potholes'));
+    // Retrieve the authorization token
+    final authToken = await AuthHelper.getAuthToken();
+
+    final response = await http.get(
+      Uri.parse('http://192.168.0.115:5000/potholes'),
+      headers: {
+        'Authorization': '$authToken',
+      },
+    );
 
     if (response.statusCode == 200) {
       final List<dynamic> data = jsonDecode(response.body);
@@ -87,7 +94,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
         }).toSet();
       });
     } else if (response.statusCode == 401) {
-      // Invalid token
+      // Invalid token, logout
       AuthHelper.logout(context, mounted);
     } else {
       print('Failed to load pothole coordinates');
@@ -194,6 +201,8 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
       detectedImageUrl = 'http://192.168.0.115:5000/confirmed/$filename';
     }
 
+    final authToken = await AuthHelper.getAuthToken();
+
     await showDialog(
       context: context,
       builder: (BuildContext context) {
@@ -219,7 +228,11 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
                         children: [
                           const Text('Detected Frame:'),
                           const SizedBox(height: 10),
-                          Image.network(detectedImageUrl, height: 200),
+                          Image.network(
+                            detectedImageUrl,
+                            height: 200,
+                            headers: {'Authorization': '$authToken'},
+                          ),
                         ],
                       )
                     : const Text('No detected image available.'),
@@ -227,7 +240,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
             ),
           ),
           actions: <Widget>[
-            if (userRole == 'Admin' || userId == creatorId)
+            if (userRole == 'Admin' || userId == creatorId) // Only show "Delete" button for admin or creator
               TextButton(
                 child: const Text('Delete'),
                 onPressed: () async {
@@ -235,19 +248,20 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
                   Navigator.of(context).pop();
                 },
               ),
-            TextButton(
-              child: const Text('Save'),
-              onPressed: () async {
-                // Update pothole with new latitude/longitude
-                await _savePothole(
-                  id,
-                  double.parse(latitudeController.text),
-                  double.parse(longitudeController.text),
-                  filename,
-                );
-                Navigator.of(context).pop();
-              },
-            ),
+            if (userRole == 'Admin' || userId == creatorId) // Only show "Save" button for admin or creator
+              TextButton(
+                child: const Text('Save'),
+                onPressed: () async {
+                  // Update pothole with new latitude/longitude
+                  await _savePothole(
+                    id,
+                    double.parse(latitudeController.text),
+                    double.parse(longitudeController.text),
+                    filename,
+                  );
+                  Navigator.of(context).pop();
+                },
+              ),
             TextButton(
               child: const Text('Cancel'),
               onPressed: () {

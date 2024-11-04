@@ -148,9 +148,37 @@ class _CameraPageState extends State<CameraPage> {
       }
     }, onError: (error) {
       print("WebSocket error: $error");
+      attemptReconnect();
     }, onDone: () {
       print("WebSocket connection closed");
     });
+  }
+
+  // Reconnection method with delay and retries
+  void attemptReconnect() async {
+    const int maxRetries = 5;
+    int retryCount = 0;
+    int delaySeconds = 2;
+
+    while (retryCount < maxRetries && mounted) {
+      await Future.delayed(Duration(seconds: delaySeconds)); // Exponential backoff
+
+      try {
+        connectWebSocket(); // Try to reconnect
+        print("WebSocket reconnected on attempt #${retryCount + 1}");
+        break; // Exit loop on successful reconnection
+      } catch (e) {
+        retryCount++;
+        delaySeconds *= 2; // Double the delay for next attempt
+        print("Reconnection attempt #${retryCount} failed: $e");
+      }
+    }
+
+    if (!mounted) {
+      print("Reconnection stopped due to widget disposal.");
+    } else if (retryCount == maxRetries) {
+      print("Max reconnection attempts reached. WebSocket failed to reconnect.");
+    }
   }
 
   Future<void> showConfirmationDialog(String filename, String imageUrl) async {
@@ -159,6 +187,8 @@ class _CameraPageState extends State<CameraPage> {
     setState(() {
       isUploading = true; // Ensure no frames are being uploaded during confirmation
     });
+
+    final authToken = await AuthHelper.getAuthToken();
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -171,7 +201,10 @@ class _CameraPageState extends State<CameraPage> {
               children: <Widget>[
                 const Text('A pothole was detected in the image. Do you confirm this detection?'),
                 const SizedBox(height: 10),
-                Image.network(imageUrl),  // Display the detected image
+                Image.network(
+                  imageUrl,
+                  headers: {'Authorization': '$authToken'}
+                ),  // Display the detected image
               ],
             ),
           ),

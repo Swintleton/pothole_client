@@ -17,22 +17,17 @@ class AuthHelper {
         },
       );
 
-      if (response.statusCode == 200) {
-        // Clear the auth token and navigate to the login page, only if still mounted
-        await prefs.remove('auth_token');
-        if (mounted) {
-          // Clear all stored user data
-          await prefs.clear(); 
+      // Clear the auth token and navigate to the login page, only if still mounted
+      await prefs.remove('auth_token');
+      if (mounted) {
+        // Clear all stored user data
+        await prefs.clear(); 
 
-          Navigator.pushAndRemoveUntil(
-            context,
-            MaterialPageRoute(builder: (context) => const LoginPage()),
-            (Route<dynamic> route) => false,
-          );
-        }
-      } else {
-        // Handle logout error
-        print('Logout failed');
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (context) => const LoginPage()),
+          (Route<dynamic> route) => false,
+        );
       }
     }
   }
