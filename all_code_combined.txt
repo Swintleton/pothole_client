@@ -20,21 +20,36 @@ class AuthHelper {
         },
       );
 
-      if (response.statusCode == 200) {
-        // Clear the auth token and navigate to the login page, only if still mounted
-        await prefs.remove('auth_token');
-        if (mounted) {
-          Navigator.pushAndRemoveUntil(
-            context,
-            MaterialPageRoute(builder: (context) => const LoginPage()),
-            (Route<dynamic> route) => false,
-          );
-        }
-      } else {
-        // Handle logout error
-        print('Logout failed');
+      // Clear the auth token and navigate to the login page, only if still mounted
+      await prefs.remove('auth_token');
+      if (mounted) {
+        // Clear all stored user data
+        await prefs.clear(); 
+
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (context) => const LoginPage()),
+          (Route<dynamic> route) => false,
+        );
       }
     }
+  }
+
+  // Retrieve stored user role
+  static Future<String?> getUserRole() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('user_role');  // Ensure 'user_role' is saved with this key on login
+  }
+
+  // Retrieve stored user ID
+  static Future<int?> getUserId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('user_id');  // Ensure 'user_id' is saved with this key on login
+  }
+
+  static Future<String?> getAuthToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('auth_token');
   }
 }
 
@@ -140,7 +155,9 @@ class _CameraPageState extends State<CameraPage> {
       final img.Image croppedImage = cropCenterSquare(convertedImage, 416);
       final List<int> jpegBytes = img.encodeJpg(croppedImage);
 
-      final String filename = 'frame_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      int? userId = await AuthHelper.getUserId();
+
+      final String filename = 'frame_$userId${DateTime.now().millisecondsSinceEpoch}.jpg';
 
       // Retrieve the authentication token
       final prefs = await SharedPreferences.getInstance();
@@ -190,9 +207,37 @@ class _CameraPageState extends State<CameraPage> {
       }
     }, onError: (error) {
       print("WebSocket error: $error");
+      attemptReconnect();
     }, onDone: () {
       print("WebSocket connection closed");
     });
+  }
+
+  // Reconnection method with delay and retries
+  void attemptReconnect() async {
+    const int maxRetries = 5;
+    int retryCount = 0;
+    int delaySeconds = 2;
+
+    while (retryCount < maxRetries && mounted) {
+      await Future.delayed(Duration(seconds: delaySeconds)); // Exponential backoff
+
+      try {
+        connectWebSocket(); // Try to reconnect
+        print("WebSocket reconnected on attempt #${retryCount + 1}");
+        break; // Exit loop on successful reconnection
+      } catch (e) {
+        retryCount++;
+        delaySeconds *= 2; // Double the delay for next attempt
+        print("Reconnection attempt #${retryCount} failed: $e");
+      }
+    }
+
+    if (!mounted) {
+      print("Reconnection stopped due to widget disposal.");
+    } else if (retryCount == maxRetries) {
+      print("Max reconnection attempts reached. WebSocket failed to reconnect.");
+    }
   }
 
   Future<void> showConfirmationDialog(String filename, String imageUrl) async {
@@ -201,6 +246,8 @@ class _CameraPageState extends State<CameraPage> {
     setState(() {
       isUploading = true; // Ensure no frames are being uploaded during confirmation
     });
+
+    final authToken = await AuthHelper.getAuthToken();
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -213,7 +260,10 @@ class _CameraPageState extends State<CameraPage> {
               children: <Widget>[
                 const Text('A pothole was detected in the image. Do you confirm this detection?'),
                 const SizedBox(height: 10),
-                Image.network(imageUrl),  // Display the detected image
+                Image.network(
+                  imageUrl,
+                  headers: {'Authorization': '$authToken'}
+                ),  // Display the detected image
               ],
             ),
           ),
@@ -347,6 +397,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'main.dart';
+import 'registration_page.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -370,28 +421,32 @@ class _LoginPageState extends State<LoginPage> {
     try {
       final response = await http
           .post(
-            Uri.parse('http://192.168.0.115:5000/login'),  // Replace with your server address
+            Uri.parse('http://192.168.0.115:5000/login'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
-              'username': _usernameController.text,
-              'password': _passwordController.text,
+              'username': _usernameController.text.trim(),
+              'password': _passwordController.text.trim(),
             }),
           )
-          .timeout(const Duration(seconds: 10)); // Set a 10-second timeout
+          .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
         final jsonResponse = jsonDecode(response.body);
         final token = jsonResponse['auth_token'];
+        final userId = jsonResponse['user_id'];
+        final userRole = jsonResponse['user_role'];
 
         // Save the username and token in local storage
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('username', _usernameController.text);  // Save the username
-        await prefs.setString('auth_token', token);  // Save the token
+        await prefs.setString('username', _usernameController.text.trim());
+        await prefs.setString('auth_token', token);
+        await prefs.setInt('user_id', userId);
+        await prefs.setString('user_role', userRole);
 
         // Navigate to the main app after successful login
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (context) => const MyApp()),  // Redirect to the main app
+          MaterialPageRoute(builder: (context) => const MyApp()),
         );
       } else {
         setState(() {
@@ -442,9 +497,25 @@ class _LoginPageState extends State<LoginPage> {
                 : Container(),
             _isLoading
                 ? const CircularProgressIndicator()
-                : ElevatedButton(
-                    onPressed: _login,
-                    child: const Text('Login'),
+                : Column(
+                    children: [
+                      ElevatedButton(
+                        onPressed: _login,
+                        child: const Text('Login'),
+                      ),
+                      const SizedBox(height: 16), // Add space between buttons
+                      TextButton(
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const RegistrationPage(),
+                            ),
+                          );
+                        },
+                        child: const Text('Register'),
+                      ),
+                    ],
                   ),
           ],
         ),
@@ -572,7 +643,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'auth_helper.dart';
 
@@ -603,12 +673,24 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   final LatLng _center = const LatLng(47.494367, 19.060115);
   Set<Marker> _markers = {};
   LatLng? _lastLongPressedLocation;
+  String? userRole;
+  int? userId;
 
   @override
   void initState() {
     super.initState();
+    _initializeUserInfo();  // Initialize user information
     _requestPermission();  // Request location permission
     _fetchPotholeCoordinates();
+  }
+
+  Future<void> _initializeUserInfo() async {
+    userRole = await AuthHelper.getUserRole();
+    userId = await AuthHelper.getUserId();
+
+    if (userId == null) {
+      print('Error: User ID is null.');
+    }
   }
 
   // Request location permissions
@@ -621,25 +703,39 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
 
   // Fetch pothole coordinates from the server
   Future<void> _fetchPotholeCoordinates() async {
-    final response = await http.get(Uri.parse('http://192.168.0.115:5000/potholes'));
+    // Retrieve the authorization token
+    final authToken = await AuthHelper.getAuthToken();
+
+    final response = await http.get(
+      Uri.parse('http://192.168.0.115:5000/potholes'),
+      headers: {
+        'Authorization': '$authToken',
+      },
+    );
 
     if (response.statusCode == 200) {
       final List<dynamic> data = jsonDecode(response.body);
       setState(() {
         _markers = data.map((pothole) {
           return Marker(
-            markerId: MarkerId(pothole['latitude'].toString() + pothole['longitude'].toString()),
+            markerId: MarkerId(pothole['id'].toString()),
             position: LatLng(pothole['latitude'], pothole['longitude']),
             infoWindow: InfoWindow(
               title: 'Pothole',
               snippet: 'Tap to edit',
-              onTap: () => _editPothole(pothole['id'], pothole['latitude'], pothole['longitude'], pothole['filename']),
+              onTap: () => _editPothole(
+                pothole['id'],
+                pothole['latitude'],
+                pothole['longitude'],
+                pothole['filename'],
+                pothole['user_id'],
+              ),
             ),
           );
         }).toSet();
       });
-    } else if(response.statusCode == 401) {
-      //Invalid token
+    } else if (response.statusCode == 401) {
+      // Invalid token, logout
       AuthHelper.logout(context, mounted);
     } else {
       print('Failed to load pothole coordinates');
@@ -658,7 +754,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   Future<void> _showAddPotholeDialog(LatLng latLng) async {
     final confirmed = await showDialog<bool>(
       context: context,
-      barrierDismissible: false, // User must tap a button
+      barrierDismissible: false,
       builder: (BuildContext context) {
         return AlertDialog(
           title: const Text('Add Pothole'),
@@ -688,8 +784,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
 
   // Add pothole by sending the request to the server
   Future<void> _addPothole(LatLng latLng) async {
-    final prefs = await SharedPreferences.getInstance();
-    final authToken = prefs.getString('auth_token');
+    final authToken = await AuthHelper.getAuthToken();
 
     final response = await http.post(
       Uri.parse('http://192.168.0.115:5000/add_pothole'),
@@ -704,19 +799,18 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     );
 
     if (response.statusCode == 200) {
-      // Assuming the server returns the ID and filename of the newly created pothole
       final data = jsonDecode(response.body);
       final int potholeId = data['id'];
       final String filename = data['filename'];
 
       setState(() {
         _markers.add(Marker(
-          markerId: MarkerId(latLng.toString()),
+          markerId: MarkerId(potholeId.toString()),
           position: latLng,
           infoWindow: InfoWindow(
             title: 'New Pothole',
             snippet: 'Tap to edit',
-            onTap: () => _editPothole(potholeId, latLng.latitude, latLng.longitude, filename),
+            onTap: () => _editPothole(potholeId, latLng.latitude, latLng.longitude, filename, userId!),
           ),
         ));
       });
@@ -728,13 +822,13 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     }
   }
 
-  // Edit an existing pothole and include filename for detected image
-  void _editPothole(int id, double latitude, double longitude, String filename) async {
-    _showEditPotholeDialog(id, latitude, longitude, filename);
+  // Edit an existing pothole
+  void _editPothole(int id, double latitude, double longitude, String filename, int creatorId) async {
+    _showEditPotholeDialog(id, latitude, longitude, filename, creatorId);
   }
 
-  // Show dialog to edit a pothole
-  Future<void> _showEditPotholeDialog(int id, double latitude, double longitude, String filename) async {
+  // Show dialog to edit or delete a pothole
+  Future<void> _showEditPotholeDialog(int id, double latitude, double longitude, String filename, int creatorId) async {
     final latitudeController = TextEditingController(text: latitude.toString());
     final longitudeController = TextEditingController(text: longitude.toString());
     String detectedImageUrl = '';
@@ -743,9 +837,12 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     if (
       filename.isNotEmpty &&
       filename != "manual_entry_detected.jpg" &&
-      filename != "manual_entry.jpg") {
+      filename != "manual_entry.jpg"
+    ) {
       detectedImageUrl = 'http://192.168.0.115:5000/confirmed/$filename';
     }
+
+    final authToken = await AuthHelper.getAuthToken();
 
     await showDialog(
       context: context,
@@ -772,7 +869,11 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
                         children: [
                           const Text('Detected Frame:'),
                           const SizedBox(height: 10),
-                          Image.network(detectedImageUrl, height: 200),
+                          Image.network(
+                            detectedImageUrl,
+                            height: 200,
+                            headers: {'Authorization': '$authToken'},
+                          ),
                         ],
                       )
                     : const Text('No detected image available.'),
@@ -780,21 +881,31 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
             ),
           ),
           actions: <Widget>[
+            if (userRole == 'Admin' || userId == creatorId) // Only show "Delete" button for admin or creator
+              TextButton(
+                child: const Text('Delete'),
+                onPressed: () async {
+                  await _deletePothole(id);
+                  Navigator.of(context).pop();
+                },
+              ),
+            if (userRole == 'Admin' || userId == creatorId) // Only show "Save" button for admin or creator
+              TextButton(
+                child: const Text('Save'),
+                onPressed: () async {
+                  // Update pothole with new latitude/longitude
+                  await _savePothole(
+                    id,
+                    double.parse(latitudeController.text),
+                    double.parse(longitudeController.text),
+                    filename,
+                  );
+                  Navigator.of(context).pop();
+                },
+              ),
             TextButton(
               child: const Text('Cancel'),
               onPressed: () {
-                Navigator.of(context).pop();
-              },
-            ),
-            TextButton(
-              child: const Text('Save'),
-              onPressed: () async {
-                // Update pothole with new latitude/longitude
-                await _savePothole(
-                  id,
-                  double.parse(latitudeController.text),
-                  double.parse(longitudeController.text),
-                );
                 Navigator.of(context).pop();
               },
             ),
@@ -804,9 +915,8 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     );
   }
 
-  Future<void> _savePothole(int id, double latitude, double longitude) async {
-    final prefs = await SharedPreferences.getInstance();
-    final authToken = prefs.getString('auth_token');
+  Future<void> _savePothole(int id, double newLatitude, double newLongitude, String filename) async {
+    final authToken = await AuthHelper.getAuthToken();
 
     final response = await http.put(
       Uri.parse('http://192.168.0.115:5000/edit_pothole/$id'),
@@ -815,27 +925,56 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
         'Content-Type': 'application/json',
       },
       body: jsonEncode({
-        'latitude': latitude,
-        'longitude': longitude,
+        'latitude': newLatitude,
+        'longitude': newLongitude,
       }),
     );
 
     if (response.statusCode == 200) {
       setState(() {
-        _markers.removeWhere((marker) =>
-            marker.markerId.value == LatLng(latitude, longitude).toString());
+        // Remove the old marker
+        _markers.removeWhere((marker) => marker.markerId.value == id.toString());
+
+        // Add a new marker with updated position but same filename
         _markers.add(Marker(
-          markerId: MarkerId(LatLng(latitude, longitude).toString()),
-          position: LatLng(latitude, longitude),
-          infoWindow: const InfoWindow(
-              title: 'Edited Pothole', snippet: 'Pothole updated'),
+          markerId: MarkerId(id.toString()),
+          position: LatLng(newLatitude, newLongitude),
+          infoWindow: InfoWindow(
+            title: 'Edited Pothole',
+            snippet: 'Pothole updated',
+            onTap: () => _editPothole(id, newLatitude, newLongitude, filename, userId!),
+          ),
         ));
       });
-    } else if(response.statusCode == 401) {
-      //Invalid token
+    } else if (response.statusCode == 401) {
       AuthHelper.logout(context, mounted);
     } else {
       print('Failed to update pothole');
+    }
+  }
+
+  // Delete pothole function
+  Future<void> _deletePothole(int id) async {
+    final authToken = await AuthHelper.getAuthToken();
+
+    final response = await http.delete(
+      Uri.parse('http://192.168.0.115:5000/delete_pothole/$id'),
+      headers: {
+        'Authorization': '$authToken',
+        'Content-Type': 'application/json',
+      },
+    );
+
+    if (response.statusCode == 200) {
+      setState(() {
+        // Remove the marker from the local map by matching with the unique ID
+        _markers.removeWhere((marker) => marker.markerId.value == id.toString());
+      });
+      print('Pothole deleted successfully');
+    } else if (response.statusCode == 401) {
+      AuthHelper.logout(context, mounted);
+    } else {
+      print('Failed to delete pothole');
     }
   }
 
@@ -854,7 +993,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
       myLocationEnabled: true,
       myLocationButtonEnabled: true,
       markers: _markers,
-      onLongPress: _onMapLongPressed, // Add long press listener to add pothole
+      onLongPress: _onMapLongPressed,
     );
   }
 }
@@ -917,6 +1056,201 @@ class _MyHomePageState extends State<MyHomePage> {
               'Welcome, $username',  // Welcome message in the center
               style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+
+./lib/registration_page.dart:
+
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+
+class RegistrationPage extends StatefulWidget {
+  const RegistrationPage({super.key});
+
+  @override
+  _RegistrationPageState createState() => _RegistrationPageState();
+}
+
+class _RegistrationPageState extends State<RegistrationPage> {
+  final TextEditingController _usernameController = TextEditingController();
+  final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _confirmPasswordController = TextEditingController();
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _phoneController = TextEditingController();
+  bool _isLoading = false;
+  String? _errorMessage;
+
+  bool _isUsernameValid(String username) {
+    final usernameRegex = RegExp(r'^[a-zA-Z0-9\_\-]+$');
+    return usernameRegex.hasMatch(username);
+  }
+
+  bool _isNameValid(String name) {
+    final nameRegex = RegExp(r'^[a-zA-Z0-9\_\-\s]+$');
+    return nameRegex.hasMatch(name);
+  }
+
+  bool _isEmailValid(String email) {
+    final emailRegex = RegExp(r'^[\w\.-]+@[a-zA-Z\d\.-]+\.[a-zA-Z]{2,}$');
+    return emailRegex.hasMatch(email);
+  }
+
+  bool _isPhoneValid(String phone) {
+    final phoneRegex = RegExp(r'^\+?(\d{1,3})?[-.\s]?(\(?\d{1,4}\)?)[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}$');
+    return phoneRegex.hasMatch(phone);
+  }
+
+  bool _isPasswordValid(String password) {
+    final passwordRegex = RegExp(r'^(?=.*?[0-9])(?=.*?[!@#\$&*~]).{8,}$');
+    return passwordRegex.hasMatch(password);
+  }
+
+  Future<void> _register() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    // Trim whitespace from inputs
+    final username = _usernameController.text.trim();
+    final name = _nameController.text.trim();
+    final email = _emailController.text.trim();
+    final phone = _phoneController.text.trim();
+    final password = _passwordController.text.trim();
+    final confirmPassword = _confirmPasswordController.text.trim();
+
+    if (!_isUsernameValid(username)) {
+      setState(() {
+        _errorMessage = 'The username can not contain special characters.';
+      });
+      _isLoading = false;
+      return;
+    }
+    if (!_isNameValid(name)) {
+      setState(() {
+        _errorMessage = 'The name can not contain special characters.';
+      });
+      _isLoading = false;
+      return;
+    }
+    if (!_isEmailValid(email)) {
+      setState(() {
+        _errorMessage = 'Please enter a valid email address.';
+      });
+      _isLoading = false;
+      return;
+    }
+    if (!_isPhoneValid(phone) && phone.isNotEmpty) {
+      setState(() {
+        _errorMessage = 'Please enter a valid phone number.';
+      });
+      _isLoading = false;
+      return;
+    }
+    if (!_isPasswordValid(password)) {
+      setState(() {
+        _errorMessage = 'Password must be at least 8 characters, include a number, and a special character.';
+      });
+      _isLoading = false;
+      return;
+    }
+    if (password != confirmPassword) {
+      setState(() {
+        _errorMessage = 'Passwords do not match. Please try again.';
+      });
+      _isLoading = false;
+      return;
+    }
+
+    try {
+      final response = await http.post(
+        Uri.parse('http://192.168.0.115:5000/register'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'username': name,
+          'login': username,
+          'password': password,
+          'email': email,
+          'phone': phone.isNotEmpty ? phone : null,
+        }),
+      );
+
+      if (response.statusCode == 201) {
+        Navigator.pop(context);
+      } else {
+        setState(() {
+          _errorMessage = 'Registration failed. Try again.';
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'An error occurred. Please try again.';
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Register')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _nameController,
+              decoration: const InputDecoration(labelText: 'Full Name'),
+            ),
+            TextField(
+              controller: _usernameController,
+              decoration: const InputDecoration(labelText: 'Username'),
+            ),
+            TextField(
+              controller: _passwordController,
+              decoration: const InputDecoration(labelText: 'Password'),
+              obscureText: true,
+            ),
+            TextField(
+              controller: _confirmPasswordController,
+              decoration: const InputDecoration(labelText: 'Confirm Password'),
+              obscureText: true,
+            ),
+            TextField(
+              controller: _emailController,
+              decoration: const InputDecoration(labelText: 'Email'),
+            ),
+            TextField(
+              controller: _phoneController,
+              decoration: const InputDecoration(labelText: 'Phone (optional)'),
+            ),
+            const SizedBox(height: 20),
+            if (_errorMessage != null)
+              Text(
+                _errorMessage!,
+                style: const TextStyle(color: Colors.red),
+              ),
+            if (_isLoading)
+              const Center(child: CircularProgressIndicator())
+            else
+              Center(
+                child: ElevatedButton(
+                  onPressed: _register,
+                  child: const Text('Register'),
+                ),
+              ),
           ],
         ),
       ),
