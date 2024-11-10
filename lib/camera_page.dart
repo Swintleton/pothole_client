@@ -63,7 +63,7 @@ class _CameraPageState extends State<CameraPage> {
             }
           });
 
-          timer = Timer.periodic(const Duration(milliseconds: 3000), (Timer t) => captureFrameFromStream()); // 2 fps
+          timer = Timer.periodic(const Duration(milliseconds: 500), (Timer t) => captureFrameFromStream()); // 2 fps
         } else {
           print('No cameras available');
         }

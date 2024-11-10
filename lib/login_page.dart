@@ -26,6 +26,7 @@ class _LoginPageState extends State<LoginPage> {
     });
 
     try {
+      // Send login request
       final response = await http
           .post(
             Uri.parse('http://192.168.0.115:5000/login'),
@@ -37,6 +38,7 @@ class _LoginPageState extends State<LoginPage> {
           )
           .timeout(const Duration(seconds: 10));
 
+      // Check response status
       if (response.statusCode == 200) {
         final jsonResponse = jsonDecode(response.body);
         final token = jsonResponse['auth_token'];
@@ -75,6 +77,7 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  //Login page user inferface
   @override
   Widget build(BuildContext context) {
     return Scaffold(

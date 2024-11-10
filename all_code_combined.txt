@@ -66,8 +66,6 @@ import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:web_socket_channel/io.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 import 'auth_helper.dart';
 
 class CameraPage extends StatefulWidget {
@@ -83,20 +81,20 @@ class _CameraPageState extends State<CameraPage> {
   bool isCameraInitialized = false;
   bool isUploading = false;
   Timer? timer;
-  late WebSocketChannel channel;
+  Timer? confirmationPoller; // Timer for polling detections
 
   @override
   void initState() {
     super.initState();
     initializeCamera();
-    connectWebSocket();
+    startConfirmationPolling(); // Start polling for pending detections
   }
 
   @override
   void dispose() {
     controller.dispose();
     timer?.cancel();
-    channel.sink.close(); // Close WebSocket connection when disposing the widget
+    confirmationPoller?.cancel(); // Stop polling when disposing the widget
     super.dispose();
   }
 
@@ -180,8 +178,8 @@ class _CameraPageState extends State<CameraPage> {
       final response = await request.send();
       if (response.statusCode == 200) {
         print('Frame uploaded successfully');
-      } else if(response.statusCode == 401) {
-        //Invalid token
+      } else if (response.statusCode == 401) {
+        // Invalid token
         AuthHelper.logout(context, mounted);
       } else {
         print('Failed to upload frame');
@@ -193,50 +191,37 @@ class _CameraPageState extends State<CameraPage> {
     }
   }
 
-  void connectWebSocket() {
-    // Establish WebSocket connection
-    channel = IOWebSocketChannel.connect('ws://192.168.0.115:5000/confirm');
-    print("WebSocket connection established");
-
-    // Listen for messages from the server
-    channel.stream.listen((message) {
-      print("Received message: $message");
-      final jsonResponse = jsonDecode(message);
-      if (jsonResponse['type'] == 'confirmation_request') {
-        showConfirmationDialog(jsonResponse['filename'], jsonResponse['image_url']);
-      }
-    }, onError: (error) {
-      print("WebSocket error: $error");
-      attemptReconnect();
-    }, onDone: () {
-      print("WebSocket connection closed");
+  // Poll the server for pending detections every 4 seconds
+  void startConfirmationPolling() {
+    confirmationPoller = Timer.periodic(const Duration(seconds: 4), (Timer t) {
+        pollForDetectionConfirmation();
     });
   }
 
-  // Reconnection method with delay and retries
-  void attemptReconnect() async {
-    const int maxRetries = 5;
-    int retryCount = 0;
-    int delaySeconds = 2;
+  Future<void> pollForDetectionConfirmation() async {
+    final authToken = await AuthHelper.getAuthToken();
 
-    while (retryCount < maxRetries && mounted) {
-      await Future.delayed(Duration(seconds: delaySeconds)); // Exponential backoff
+    final response = await http.get(
+      Uri.parse('http://192.168.0.115:5000/get_detection_confirmation'),
+      headers: {
+        'Authorization': '$authToken',
+      },
+    );
 
-      try {
-        connectWebSocket(); // Try to reconnect
-        print("WebSocket reconnected on attempt #${retryCount + 1}");
-        break; // Exit loop on successful reconnection
-      } catch (e) {
-        retryCount++;
-        delaySeconds *= 2; // Double the delay for next attempt
-        print("Reconnection attempt #${retryCount} failed: $e");
+    if (response.statusCode == 200) {
+      final detectionData = jsonDecode(response.body);
+      if (detectionData.isNotEmpty) {
+        final filename = detectionData['filename'];
+        final imageUrl = 'http://192.168.0.115:5000/confirmed/$filename';
+        
+        // Show confirmation
+        await showConfirmationDialog(filename, imageUrl);
       }
-    }
-
-    if (!mounted) {
-      print("Reconnection stopped due to widget disposal.");
-    } else if (retryCount == maxRetries) {
-      print("Max reconnection attempts reached. WebSocket failed to reconnect.");
+    } else if (response.statusCode == 401) {
+      // Invalid token
+      AuthHelper.logout(context, mounted);
+    } else {
+      print('Failed to fetch detection confirmation');
     }
   }
 
@@ -285,11 +270,8 @@ class _CameraPageState extends State<CameraPage> {
       },
     );
 
-    // Send the response back to the server
-    channel.sink.add(jsonEncode({
-      'filename': filename,
-      'confirmed': confirmed ?? false,
-    }));
+    // Call the /confirm endpoint to send the user's confirmation response
+    await sendConfirmationResponse(filename, confirmed ?? false);
 
     // Resume the camera stream after the popup is closed
     await controller.startImageStream((CameraImage image) {
@@ -302,6 +284,31 @@ class _CameraPageState extends State<CameraPage> {
     setState(() {
       isUploading = false;  // Reset the uploading flag
     });
+  }
+
+  Future<void> sendConfirmationResponse(String filename, bool confirmed) async {
+    // Remove the "_detected" suffix from filename if present
+    final cleanedFilename = filename.replaceAll('_detected.jpg', '.jpg');
+
+    final authToken = await AuthHelper.getAuthToken();
+
+    final response = await http.post(
+      Uri.parse('http://192.168.0.115:5000/confirm'),
+      headers: {
+        'Authorization': '$authToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'filename': cleanedFilename,
+        'confirmed': confirmed,
+      }),
+    );
+
+    if (response.statusCode == 200) {
+      print('Confirmation sent successfully');
+    } else {
+      print('Failed to send confirmation');
+    }
   }
 
   img.Image cropCenterSquare(img.Image src, int size) {

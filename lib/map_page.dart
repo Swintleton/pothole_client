@@ -29,7 +29,7 @@ class GoogleMapWidget extends StatefulWidget {
 
 class _GoogleMapWidgetState extends State<GoogleMapWidget> {
   late GoogleMapController mapController;
-  final LatLng _center = const LatLng(47.494367, 19.060115);
+  final LatLng _center = const LatLng(47.494367, 19.060115); // Centre of Budapest
   Set<Marker> _markers = {};
   LatLng? _lastLongPressedLocation;
   String? userRole;
@@ -65,6 +65,7 @@ class _GoogleMapWidgetState extends State<GoogleMapWidget> {
     // Retrieve the authorization token
     final authToken = await AuthHelper.getAuthToken();
 
+    // Send get pothole request
     final response = await http.get(
       Uri.parse('http://192.168.0.115:5000/potholes'),
       headers: {

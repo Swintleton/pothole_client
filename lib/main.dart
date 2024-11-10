@@ -78,6 +78,7 @@ class _MainPageState extends State<MainPage> {
     });
   }
 
+  //Bottom bar for each page
   @override
   Widget build(BuildContext context) {
     return Scaffold(

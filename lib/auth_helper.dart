@@ -9,7 +9,7 @@ class AuthHelper {
     final authToken = prefs.getString('auth_token');
 
     if (authToken != null) {
-      final response = await http.post(
+      await http.post(
         Uri.parse('http://192.168.0.115:5000/logout'),
         headers: {
           'Authorization': authToken,

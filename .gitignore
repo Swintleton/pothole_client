@@ -27,3 +27,7 @@ doc/api/
 .flutter-plugins-dependencies
 
 all_code_combined.txt
+
+android/key.properties
+
+.vscode/
