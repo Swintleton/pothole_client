@@ -29,6 +29,11 @@ doc/api/
 all_code_combined.txt
 
 android/key.properties
-.pothole-release-key.jks
 
 .vscode/
+
+*.jks
+*.keystore
+.idea/
+.metadata/
+android/.kotlin/
