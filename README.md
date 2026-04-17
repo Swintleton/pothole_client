@@ -44,7 +44,7 @@ The client is built with **Flutter** and **Dart**, with the following core packa
 lib/
 ├── auth_helper.dart        # Authentication helper methods
 ├── camera_page.dart        # Camera capture and upload page
-├── config.dart             # Configuration settings
+├── config.dart             # Backend and environment configuration
 ├── login_page.dart         # Login screen
 ├── main.dart               # App entry point and navigation
 ├── map_page.dart           # Google Maps page
