@@ -121,5 +121,5 @@ Detailed documentation:
 
 ## Notes
 
-- The current client code contains hardcoded backend URLs pointing to a local network IP address. These should be updated before deployment.
+- The current client code contains configure the backend base URL in `config.dart` for your environment pointing to a local network IP address. These should be updated before deployment.
 - The repository includes Android, iOS, Linux, macOS, Web, and Windows platform folders generated for Flutter targets.
